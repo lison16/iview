@@ -54,6 +54,7 @@
                 :placement="placement"
                 ref="dropdown"
                 :data-transfer="transfer"
+                :transfer="transfer"
                 v-transfer-dom
             >
                 <ul v-show="showNotFoundLabel" :class="[prefixCls + '-not-found']"><li>{{ localeNotFoundText }}</li></ul>
@@ -71,7 +72,6 @@
     </div>
 </template>
 <script>
-    import Icon from '../icon';
     import Drop from './dropdown.vue';
     import {directive as clickOutside} from 'v-click-outside-x';
     import TransferDom from '../../directives/transfer-dom';
@@ -135,13 +135,22 @@
         return textContent || (typeof innerHTML === 'string' ? innerHTML : '');
     };
 
+    const checkValuesNotEqual = (value,publicValue,values) => {
+        const strValue = JSON.stringify(value);
+        const strPublic = JSON.stringify(publicValue);
+        const strValues = JSON.stringify(values.map( item => {
+            return item.value;
+        }));
+        return strValue !== strPublic || strValue !== strValues || strValues !== strPublic;
+    };
+
 
     const ANIMATION_TIMEOUT = 300;
 
     export default {
         name: 'iSelect',
         mixins: [ Emitter, Locale ],
-        components: { FunctionalOptions, Drop, Icon, SelectHead },
+        components: { FunctionalOptions, Drop, SelectHead },
         directives: { clickOutside, TransferDom },
         props: {
             value: {
@@ -188,6 +197,9 @@
             size: {
                 validator (value) {
                     return oneOf(value, ['small', 'large', 'default']);
+                },
+                default () {
+                    return !this.$IVIEW || this.$IVIEW.size === '' ? 'default' : this.$IVIEW.size;
                 }
             },
             labelInValue: {
@@ -199,13 +211,15 @@
             },
             placement: {
                 validator (value) {
-                    return oneOf(value, ['top', 'bottom']);
+                    return oneOf(value, ['top', 'bottom', 'top-start', 'bottom-start', 'top-end', 'bottom-end']);
                 },
-                default: 'bottom'
+                default: 'bottom-start'
             },
             transfer: {
                 type: Boolean,
-                default: false
+                default () {
+                    return !this.$IVIEW || this.$IVIEW.transfer === '' ? false : this.$IVIEW.transfer;
+                }
             },
             // Use for AutoComplete
             autoComplete: {
@@ -230,9 +244,7 @@
                 }).filter(Boolean);
             }
 
-            if (this.values.length > 0 && this.selectOptions.length === 0){
-                this.hasExpectedValue = this.values;
-            }
+            this.checkUpdateStatus();
         },
         data () {
 
@@ -252,6 +264,7 @@
                 unchangedQuery: true,
                 hasExpectedValue: false,
                 preventRemoteCall: false,
+                filterQueryChange: false,  // #4273
             };
         },
         computed: {
@@ -280,12 +293,6 @@
                     [`${prefixCls}-selection`]: !this.autoComplete,
                     [`${prefixCls}-selection-focused`]: this.isFocused
                 };
-            },
-            queryStringMatchesSelectedOption(){
-                const selectedOptions = this.values[0];
-                if (!selectedOptions) return false;
-                const [query, label] = [this.query, selectedOptions.label].map(str => (str || '').trim());
-                return !this.multiple && this.unchangedQuery && query === label;
             },
             localeNotFoundText () {
                 if (typeof this.notFoundText === 'undefined') {
@@ -326,7 +333,7 @@
             },
             canBeCleared(){
                 const uiStateMatch = this.hasMouseHoverHead || this.active;
-                const qualifiesForClear = !this.multiple && this.clearable;
+                const qualifiesForClear = !this.multiple && !this.disabled && this.clearable;
                 return uiStateMatch && qualifiesForClear && this.reset; // we return a function
             },
             selectOptions() {
@@ -353,7 +360,6 @@
                         });
                     });
                 }
-
                 for (let option of slotOptions) {
 
                     const cOptions = option.componentOptions;
@@ -368,17 +374,20 @@
                             );
                         }
 
-                        cOptions.children = children.map(opt => {
+                        // fix #4371
+                        children = children.map(opt => {
                             optionCounter = optionCounter + 1;
                             return this.processOption(opt, selectedValues, optionCounter === currentIndex);
                         });
 
-                        // keep the group if it still has children
-                        if (cOptions.children.length > 0) selectOptions.push({...option});
+                        // keep the group if it still has children  // fix #4371
+                        if (children.length > 0) selectOptions.push({...option,componentOptions:{...cOptions,children:children}});
                     } else {
                         // ignore option if not passing filter
-                        const optionPassesFilter = this.filterable ? this.validateOption(cOptions) : option;
-                        if (!optionPassesFilter) continue;
+                        if (this.filterQueryChange) {
+                            const optionPassesFilter = this.filterable ? this.validateOption(cOptions) : option;
+                            if (!optionPassesFilter) continue;
+                        }
 
                         optionCounter = optionCounter + 1;
                         selectOptions.push(this.processOption(option, selectedValues, optionCounter === currentIndex));
@@ -423,9 +432,13 @@
                 };
             },
             getInitialValue(){
-                const {multiple, value} = this;
+                const {multiple, remote, value} = this;
                 let initialValue = Array.isArray(value) ? value : [value];
                 if (!multiple && (typeof initialValue[0] === 'undefined' || (String(initialValue[0]).trim() === '' && !Number.isFinite(initialValue[0])))) initialValue = [];
+                if (remote && !multiple && value) {
+                    const data = this.getOptionData(value);
+                    this.query = data ? data.label : String(value);
+                }
                 return initialValue.filter((item) => {
                     return Boolean(item) || item === 0;
                 });
@@ -453,8 +466,6 @@
             },
 
             validateOption({children, elm, propsData}){
-                if (this.queryStringMatchesSelectedOption) return true;
-
                 const value = propsData.value;
                 const label = propsData.label || '';
                 const textContent = (elm && elm.textContent) || (children || []).reduce((str, node) => {
@@ -519,6 +530,7 @@
                 this.focusIndex = -1;
                 this.unchangedQuery = true;
                 this.values = [];
+                this.filterQueryChange = false;
             },
             handleKeydown (e) {
                 if (e.key === 'Backspace'){
@@ -618,11 +630,15 @@
                     if (!this.autoComplete) this.$nextTick(() => inputField.focus());
                 }
                 this.broadcast('Drop', 'on-update-popper');
+                setTimeout(() => {
+                  this.filterQueryChange = false;
+                },300)
             },
             onQueryChange(query) {
                 if (query.length > 0 && query !== this.query) this.visible = true;
                 this.query = query;
                 this.unchangedQuery = this.visible;
+                this.filterQueryChange = true;
             },
             toggleHeaderFocus({type}){
                 if (this.disabled) {
@@ -632,14 +648,21 @@
             },
             updateSlotOptions(){
                 this.slotOptions = this.$slots.default;
-            }
+            },
+            checkUpdateStatus() {
+                if (this.getInitialValue().length > 0 && this.selectOptions.length === 0) {
+                    this.hasExpectedValue = true;
+                }
+            },
         },
         watch: {
             value(value){
-                const {getInitialValue, getOptionData, publicValue} = this;
+                const {getInitialValue, getOptionData, publicValue, values} = this;
+
+                this.checkUpdateStatus();
 
                 if (value === '') this.values = [];
-                else if (JSON.stringify(value) !== JSON.stringify(publicValue)) {
+                else if (checkValuesNotEqual(value,publicValue,values)) {
                     this.$nextTick(() => this.values = getInitialValue().map(getOptionData).filter(Boolean));
                 }
             },
@@ -716,7 +739,10 @@
                 this.broadcast('Drop', open ? 'on-update-popper' : 'on-destroy-popper');
             },
             selectOptions(){
-                if (this.hasExpectedValue){
+                if (this.hasExpectedValue && this.selectOptions.length > 0){
+                    if (this.values.length === 0) {
+                        this.values = this.getInitialValue();
+                    }
                     this.values = this.values.map(this.getOptionData).filter(Boolean);
                     this.hasExpectedValue = false;
                 }
